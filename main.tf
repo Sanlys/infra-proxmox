@@ -147,7 +147,7 @@ output "workerips" {
   description = "Worker IPs"
 }
 
-/* */
+
 
 resource "talos_machine_secrets" "all_nodes" {}
 
@@ -163,16 +163,6 @@ data "talos_machine_configuration" "controlplane" {
         path = "/machine/install"
         value = {
           image = "factory.talos.dev/installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.8.3"
-        }
-      },
-      {
-        op   = "add"
-        path = "/machine/services/-"
-        value = {
-          name    = "qemu-guest-agent"
-          command = "/usr/bin/qemu-ga"
-          args    = ["--method=virtio-serial", "--path=/dev/virtio-ports/org.qemu.guest_agent.0"]
-          enabled = true
         }
       }
     ])
@@ -198,6 +188,17 @@ data "talos_machine_configuration" "worker" {
   machine_type     = "worker"
   cluster_endpoint = "https://${element(local.controlplaneips, 0)}:6443"
   machine_secrets  = talos_machine_secrets.all_nodes.machine_secrets
+  config_patches = [
+    yamlencode([
+      {
+        op   = "add"
+        path = "/machine/install"
+        value = {
+          image = "factory.talos.dev/installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.8.3"
+        }
+      }
+    ])
+  ]
 }
 
 data "talos_client_configuration" "worker" {
@@ -227,4 +228,5 @@ resource "talos_cluster_kubeconfig" "this" {
   depends_on           = [talos_machine_bootstrap.controlplane]
   client_configuration = data.talos_client_configuration.controlplane.client_configuration
   node                 = local.controlplaneips[0]
+
 }
