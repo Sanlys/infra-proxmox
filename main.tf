@@ -12,6 +12,10 @@ terraform {
       source  = "hashicorp/kubernetes"
       version = "2.35.0"
     }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "2.16.1"
+    }
   }
 }
 
@@ -246,3 +250,45 @@ provider "kubernetes" {
   config_path    = "tmp/kubeconfig.yaml"
   config_context = "admin@infra"
 }
+
+provider "helm" {
+  kubernetes {
+    config_path = "tmp/kubeconfig.yaml"
+  }
+}
+
+resource "kubernetes_namespace" "metallb" {
+  depends_on = [local_sensitive_file.kubeconfig]
+
+  metadata {
+    name = "metallb-system"
+    labels = {
+      "pod-security.kubernetes.io/enforce"         = "baseline"
+      "pod-security.kubernetes.io/enforce-version" = "latest"
+    }
+  }
+}
+
+resource "helm_release" "metallb" {
+  depends_on       = [kubernetes_namespace.metallb]
+  name             = "metallb"
+  chart            = "https://github.com/metallb/metallb/releases/download/metallb-chart-0.14.9/metallb-0.14.9.tgz"
+  namespace        = kubernetes_namespace.metallb.metadata[0].name
+  create_namespace = false
+}
+/*
+resource "kubernetes_manifest" "metallb" {
+  depends_on = [helm_release.metallb]
+  manifest = {
+    apiVersion = "metallb.io/v1beta1"
+    kind       = "IPAddressPool"
+    metadata = {
+      name      = "ip-range"
+      namespace = "metallb-system"
+    }
+    spec = {
+      addresses = ["10.0.5.200-10.0.5.205"]
+    }
+  }
+}
+*/
