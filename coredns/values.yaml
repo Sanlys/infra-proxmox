@@ -1,0 +1,17 @@
+servers:
+- zones:
+  - zone: .
+  port: 53
+  plugins:
+  - name: errors
+  - name: health
+    configBlock: |-
+      lameduck 1s
+  - name: ready
+  - name: prometheus
+    parameters: 0.0.0.0:9153
+  - name: forward
+    parameters: . 10.0.0.1
+  - name: cache
+    parameters: 30
+  - name: log
