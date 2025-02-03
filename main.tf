@@ -69,11 +69,11 @@ variable "vms" {
     },
     {
       node          = "pve2"
-      control_plane = false
+      control_plane = true
     },
     {
       node          = "pve3"
-      control_plane = true
+      control_plane = false
     },
     {
       node          = "pve4"
@@ -134,13 +134,13 @@ resource "proxmox_vm_qemu" "node" {
 }
 
 locals {
-  ips = [for vm in proxmox_vm_qemu.node : vm.ssh_host]
-  controlplaneips = [
+  ips = toset([for vm in proxmox_vm_qemu.node : vm.ssh_host])
+  controlplaneips = toset([
     for vm in proxmox_vm_qemu.node :
     vm.ssh_host
     if can(regex("(?i)control-plane", vm.tags))
-  ]
-  workerips = tolist(setsubtract(local.ips, local.controlplaneips))
+  ])
+  workerips = toset(setsubtract(local.ips, local.controlplaneips))
 }
 
 output "ips" {
@@ -167,10 +167,17 @@ data "talos_machine_configuration" "controlplane" {
   machine_secrets  = talos_machine_secrets.all_nodes.machine_secrets
 }
 
-data "talos_client_configuration" "controlplane" {
+data "talos_machine_configuration" "worker" {
+  cluster_name     = "infra"
+  machine_type     = "worker"
+  cluster_endpoint = "https://api.infrak8s.s1.lan:6443"
+  machine_secrets  = talos_machine_secrets.all_nodes.machine_secrets
+}
+
+data "talos_client_configuration" "all_nodes" {
   cluster_name         = "infra"
   client_configuration = talos_machine_secrets.all_nodes.client_configuration
-  nodes                = local.controlplaneips
+  endpoints            = local.controlplaneips
 }
 
 data "talos_image_factory_extensions_versions" "this" {
@@ -197,7 +204,11 @@ resource "talos_image_factory_schematic" "this" {
 }
 
 resource "talos_machine_configuration_apply" "controlplane" {
-  count = length(local.controlplaneips)
+  for_each                    = local.controlplaneips
+  client_configuration        = talos_machine_secrets.all_nodes.client_configuration
+  machine_configuration_input = data.talos_machine_configuration.controlplane.machine_configuration
+  node                        = each.key
+  apply_mode                  = "reboot"
   config_patches = [
     yamlencode([
       {
@@ -229,11 +240,44 @@ resource "talos_machine_configuration_apply" "controlplane" {
       }
     ])
   ]
-  client_configuration        = data.talos_client_configuration.controlplane.client_configuration
-  machine_configuration_input = data.talos_machine_configuration.controlplane.machine_configuration
-  node                        = element(local.controlplaneips, count.index)
-  apply_mode                  = "reboot"
-  #endpoint                    = element(local.controlplaneips, count.index)
+}
+
+resource "talos_machine_configuration_apply" "worker" {
+  client_configuration        = talos_machine_secrets.all_nodes.client_configuration
+  machine_configuration_input = data.talos_machine_configuration.worker.machine_configuration
+  for_each                    = local.workerips
+  node                        = each.key
+  config_patches = [
+    yamlencode([
+      {
+        op   = "add"
+        path = "/machine/install"
+        value = {
+          image = "factory.talos.dev/installer/${talos_image_factory_schematic.this.id}:${data.talos_image_factory_extensions_versions.this.talos_version}",
+          disk  = "/dev/sda"
+        }
+      }
+    ]),
+    yamlencode([
+      {
+        op    = "add"
+        path  = "/cluster/allowSchedulingOnControlPlanes"
+        value = true
+      }
+    ]),
+    yamlencode([
+      {
+        op   = "add"
+        path = "/machine/kubelet/extraMounts"
+        value = [{
+          destination = "/var/lib/longhorn"
+          type        = "bind"
+          source      = "/var/lib/longhorn"
+          options     = ["bind", "rshared", "rw"]
+        }]
+      }
+    ])
+  ]
 }
 
 /*
@@ -272,23 +316,18 @@ resource "talos_machine_configuration_apply" "worker" {
 resource "talos_machine_bootstrap" "controlplane" {
   depends_on = [talos_machine_configuration_apply.controlplane]
 
-  client_configuration = data.talos_client_configuration.controlplane.client_configuration
-  endpoint             = local.controlplaneips[0]
-  node                 = local.controlplaneips[0]
+  client_configuration = data.talos_client_configuration.all_nodes.client_configuration
+  node                 = [for k, v in local.controlplaneips : k][0]
 }
 
 resource "talos_cluster_kubeconfig" "this" {
   depends_on           = [talos_machine_bootstrap.controlplane]
-  client_configuration = data.talos_client_configuration.controlplane.client_configuration
-  node                 = local.controlplaneips[0]
-}
-
-output "test" {
-  value = talos_cluster_kubeconfig.this.kubernetes_client_configuration.host
+  client_configuration = data.talos_client_configuration.all_nodes.client_configuration
+  node                 = [for k, v in local.controlplaneips : k][0]
 }
 
 resource "local_sensitive_file" "talosconfig" {
-  content  = data.talos_client_configuration.controlplane.talos_config
+  content  = data.talos_client_configuration.all_nodes.talos_config
   filename = "tmp/talosconfig.yaml"
 }
 
@@ -835,7 +874,6 @@ resource "kubernetes_manifest" "dns_records" {
     }
   }
 }
-
 resource "kubernetes_namespace" "grafana_prom_stack" {
   depends_on = [local_sensitive_file.kubeconfig]
 
@@ -843,6 +881,7 @@ resource "kubernetes_namespace" "grafana_prom_stack" {
     name = "grafana-prom-stack"
   }
 }
+
 
 resource "helm_release" "grafana_prom_stack" {
   depends_on       = [kubernetes_namespace.grafana_prom_stack]
