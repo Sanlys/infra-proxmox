@@ -1,0 +1,7 @@
+persistence:
+  enabled: true
+  type: sts
+  accessModes:
+    - ReadWriteOnce
+  size: 20Gi
+  

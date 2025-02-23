@@ -10,8 +10,25 @@ servers:
   - name: ready
   - name: prometheus
     parameters: 0.0.0.0:9153
+  - name: file
+    parameters: /etc/coredns/doh.db _dns.lysakermoen.com
+  - name: hosts
+    configBlock: |-
+      10.0.5.231  registry.lysakermoen.com
+      10.0.5.231  test.lysakermoen.com
+      10.0.5.231  dns.lysakermoen.com
+      10.0.5.231  api.infra.lysakermoen.com
+      fallthrough
   - name: forward
     parameters: . 10.0.0.1
   - name: cache
     parameters: 30
   - name: log
+
+zoneFiles:
+  - filename: doh.db
+    contents: |
+      lysakermoen.com.            IN  SOA localhost.  hostmaster.localhost. (2025210201 7200 3600 1209600 3600)
+      lysakermoen.com.            IN  NS  localhost.
+      _dns.lysakermoen.com. 3600  IN  HTTPS 1   dns.lysakermoen.com. alpn=h2 dohpath=/dns-query
+      _dns.lysakermoen.com. 3600  IN  SVCB  1   dns.lysakermoen.com. alpn=h2 dohpath=/dns-query

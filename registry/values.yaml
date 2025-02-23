@@ -1,0 +1,22 @@
+replicaCount: 1
+
+ingress:
+  enabled: true
+  className: null
+  hosts:
+    - registry.lysakermoen.com
+
+persistence:
+  enabled: true
+  accessMode: 'ReadWriteOnce'
+  size: 10Gi
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+
+garbageCollect:
+  enable: true
+  deleteUntagged: true
+  schedule: "0 1 * * *"

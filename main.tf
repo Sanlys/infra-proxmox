@@ -69,7 +69,8 @@ variable "vms" {
     },
     {
       node          = "pve2"
-      control_plane = true
+      control_plane = false
+      cores         = 6
     },
     {
       node          = "pve3"
@@ -78,10 +79,26 @@ variable "vms" {
     {
       node          = "pve4"
       control_plane = true
+      cores         = 12
+      memory        = 8192
     },
     {
       node          = "pve5"
       control_plane = true
+      cores         = 8
+      memory        = 8192
+    },
+    {
+      node          = "pve6"
+      control_plane = true
+      cores         = 10
+      memory        = 16384
+    },
+    {
+      node          = "pve6"
+      control_plane = false
+      cores         = 10
+      memory        = 32768
     }
   ]
 }
@@ -434,6 +451,39 @@ resource "helm_release" "coredns" {
   set {
     name  = "extraVolumeMounts"
     value = ""
+  }
+}
+
+resource "kubernetes_config_map" "coredns" {
+  depends_on = [helm_release.coredns]
+  metadata {
+    name      = "coredns"
+    namespace = "kube-system"
+  }
+
+  data = {
+    Corefile = <<EOF
+.:53 {
+    errors
+    health {
+      lameduck 5s
+    }
+    ready
+    log . {
+      class error
+    }
+    prometheus :9153
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+        pods insecure
+        fallthrough in-addr.arpa ip6.arpa
+    }
+    forward . 10.0.5.230
+    cache 30
+    loop
+    reload
+    loadbalance
+}
+EOF
   }
 }
 
@@ -879,9 +929,13 @@ resource "kubernetes_namespace" "grafana_prom_stack" {
 
   metadata {
     name = "grafana-prom-stack"
+    labels = {
+      "pod-security.kubernetes.io/enforce" = "privileged"
+      "pod-security.kubernetes.io/audit"   = "privileged"
+      "pod-security.kubernetes.io/warn"    = "privileged"
+    }
   }
 }
-
 
 resource "helm_release" "grafana_prom_stack" {
   depends_on       = [kubernetes_namespace.grafana_prom_stack]
@@ -889,4 +943,218 @@ resource "helm_release" "grafana_prom_stack" {
   chart            = "https://github.com/prometheus-community/helm-charts/releases/download/kube-prometheus-stack-68.2.1/kube-prometheus-stack-68.2.1.tgz"
   namespace        = kubernetes_namespace.grafana_prom_stack.metadata[0].name
   create_namespace = false
+
+  values = [
+    "${file("./grafana-prom-stack/values.yaml")}"
+  ]
+}
+
+resource "kubernetes_namespace" "registry" {
+  depends_on = [local_sensitive_file.kubeconfig]
+
+  metadata {
+    name = "registry"
+  }
+}
+
+resource "helm_release" "registry" {
+  depends_on = [
+    kubernetes_namespace.registry,
+    helm_release.longhorn,
+    helm_release.traefik
+  ]
+
+  name             = "registry"
+  chart            = "https://helm.twun.io/docker-registry-2.2.3.tgz"
+  namespace        = kubernetes_namespace.registry.metadata[0].name
+  create_namespace = false
+
+  values = [
+    "${file("./registry/values.yaml")}"
+  ]
+}
+
+resource "kubernetes_namespace" "doh-proxy" {
+  depends_on = [local_sensitive_file.kubeconfig]
+  metadata {
+    name = "doh-proxy"
+  }
+}
+
+resource "kubernetes_deployment" "doh-proxy" {
+  depends_on = [
+    kubernetes_namespace.doh-proxy,
+    helm_release.coredns,
+    helm_release.registry
+  ]
+
+  metadata {
+    name      = "doh-proxy"
+    namespace = kubernetes_namespace.doh-proxy.metadata[0].name
+    labels = {
+      app = "doh-proxy"
+    }
+  }
+
+  spec {
+    replicas = 1
+    selector {
+      match_labels = {
+        app = "doh-proxy"
+      }
+    }
+
+    template {
+      metadata {
+        labels = {
+          app = "doh-proxy"
+        }
+      }
+
+      spec {
+        container {
+          image = "registry.lysakermoen.com/doh-proxy:1.0.0"
+          name  = "doh-proxy"
+          env {
+            name  = "LISTEN_ADDRESS"
+            value = "0.0.0.0:80"
+          }
+          env {
+            name  = "UPSTREAM_DNS"
+            value = "10.0.5.230:53"
+          }
+          env {
+            name  = "HOSTNAME"
+            value = "dns.lysakermoen.com"
+          }
+        }
+      }
+    }
+  }
+}
+
+resource "kubernetes_service" "doh-proxy" {
+  depends_on = [kubernetes_deployment.doh-proxy]
+
+  metadata {
+    name      = "doh-proxy"
+    namespace = kubernetes_namespace.doh-proxy.metadata[0].name
+  }
+  spec {
+    selector = {
+      app = "doh-proxy"
+    }
+    port {
+      name        = "http"
+      port        = 80
+      target_port = 80
+    }
+    type = "ClusterIP"
+  }
+}
+
+resource "kubernetes_ingress_v1" "doh-proxy" {
+  depends_on = [kubernetes_namespace.doh-proxy]
+  metadata {
+    name      = "doh-proxy"
+    namespace = kubernetes_namespace.doh-proxy.metadata[0].name
+  }
+  spec {
+    rule {
+      host = "dns.lysakermoen.com"
+      http {
+        path {
+          backend {
+            service {
+              name = kubernetes_service.doh-proxy.metadata[0].name
+              port {
+                name = "http"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+resource "kubernetes_namespace" "application_api" {
+  depends_on = [local_sensitive_file.kubeconfig]
+
+  metadata {
+    name = "application-api"
+  }
+}
+
+resource "kubernetes_manifest" "application_api" {
+  depends_on = [kubernetes_namespace.application_api]
+  manifest = {
+    apiVersion = "traefik.io/v1alpha1"
+    kind       = "IngressRouteTCP"
+    metadata = {
+      name      = "application-api"
+      namespace = kubernetes_namespace.application_api.metadata[0].name
+    }
+    spec = {
+      entryPoints = ["websecure"]
+      routes = [
+        {
+          match = "HostSNI(`api.app-cluster.lysakermoen.com`)"
+          services = [
+            {
+              name = "application-api"
+              port = 443
+            }
+          ]
+        }
+      ]
+      tls = {
+        passthrough = true
+      }
+    }
+  }
+}
+
+resource "kubernetes_service" "application_api" {
+  depends_on = [kubernetes_namespace.application_api]
+
+  metadata {
+    name      = "application-api"
+    namespace = kubernetes_namespace.application_api.metadata[0].name
+  }
+  spec {
+    type = "ClusterIP"
+    port {
+      name        = "https"
+      port        = 443
+      target_port = 6443
+    }
+  }
+}
+
+resource "kubernetes_endpoints" "application_api" {
+  depends_on = [kubernetes_namespace.application_api]
+
+  metadata {
+    name      = "application-api"
+    namespace = kubernetes_namespace.application_api.metadata[0].name
+  }
+
+  subset {
+    address {
+      ip = "10.0.5.30"
+    }
+    address {
+      ip = "10.0.5.50"
+    }
+    address {
+      ip = "10.0.5.148"
+    }
+
+    port {
+      name     = "https"
+      port     = 6443
+      protocol = "TCP"
+    }
+  }
 }
